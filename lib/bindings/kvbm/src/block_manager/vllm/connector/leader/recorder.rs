@@ -345,10 +345,20 @@ impl Leader for KvConnectorLeaderRecorder {
             request: request.clone(),
             tokens: tokens.clone(),
         };
-        let _ = self.connector_leader.create_slot(request, tokens);
+        let output = self.connector_leader.create_slot(request, tokens);
         let _ = self
             .unbounded_tx
             .send(Action::CreateSlot(input_copy, CreateSlotOutput {}));
-        Ok(())
+        output
+    }
+
+    fn get_cache_stats(&self, request_id: String) -> anyhow::Result<Option<(u64, u64, u64)>> {
+        // Delegate to the underlying connector leader
+        self.connector_leader.get_cache_stats(request_id)
+    }
+
+    fn record_device_cache_hits(&self, request_id: String, num_tokens: usize) -> anyhow::Result<()> {
+        // Delegate to the underlying connector leader
+        self.connector_leader.record_device_cache_hits(request_id, num_tokens)
     }
 }

@@ -394,6 +394,11 @@ impl<S: Storage, L: LocalityProvider> Slot<S, L> {
     pub fn num_blocks_cached_from_disk(&self) -> usize {
         self.blocks_cached_from_disk
     }
+
+    /// Record device (GPU) cache hits - called when GPU prefix cache matches
+    pub fn record_device_cache_hits(&mut self, num_tokens: usize) {
+        self.blocks_cached_from_device = num_tokens / (self.sequence.block_size() as usize);
+    }
 }
 
 impl<L: LocalityProvider> Slot<DeviceStorage, L> {

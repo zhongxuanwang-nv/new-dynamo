@@ -22,12 +22,31 @@ pub struct WorkerIdInfo {
     pub decode_worker_id: Option<u64>,
 }
 
+/// Cache hit breakdown for multi-tier caching (GPU/CPU/Disk)
+/// Only available when KVBM is enabled
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct CacheHitBreakdown {
+    /// Number of blocks found in device (GPU) cache
+    pub device_blocks: u64,
+
+    /// Number of blocks found in host (CPU) cache
+    pub host_blocks: u64,
+
+    /// Number of blocks found in disk cache
+    pub disk_blocks: u64,
+}
+
 /// NVIDIA LLM response extensions
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct NvExtResponse {
     /// Worker ID information (prefill and decode worker IDs)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub worker_id: Option<WorkerIdInfo>,
+
+    /// Cache hit breakdown across device/host/disk tiers
+    /// Only populated when KVBM is enabled and "cache_hit_breakdown" is requested in extra_fields
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_hit_breakdown: Option<CacheHitBreakdown>,
 }
 
 /// NVIDIA LLM extensions to the OpenAI API
@@ -76,7 +95,8 @@ pub struct NvExt {
 
     /// Extra fields to be included in the response's nvext
     /// This is a list of field names that should be populated in the response
-    /// Supported fields: "worker_id"
+    /// Supported fields: "worker_id", "cache_hit_breakdown"
+    /// Note: "cache_hit_breakdown" is only available when KVBM is enabled
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[builder(default, setter(strip_option))]
     pub extra_fields: Option<Vec<String>>,

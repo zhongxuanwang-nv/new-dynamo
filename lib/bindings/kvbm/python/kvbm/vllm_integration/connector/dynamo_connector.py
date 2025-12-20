@@ -80,6 +80,10 @@ class DynamoConnector(KVConnectorBase_V1):
     ):
         self._scheduler.update_state_after_alloc(request, blocks, num_external_tokens)
 
+    def record_device_cache_hits(self, request_id: str, num_tokens: int) -> None:
+        """Record device (GPU) cache hits for a request."""
+        self._scheduler.record_device_cache_hits(request_id, num_tokens)
+
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
     ) -> KVConnectorMetadata:

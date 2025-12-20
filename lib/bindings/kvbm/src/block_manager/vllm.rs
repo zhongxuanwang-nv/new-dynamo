@@ -237,6 +237,34 @@ impl KvbmCacheManager {
             }
         }
     }
+
+    /// Record device (GPU) cache hits for a request
+    /// This is called from get_computed_blocks to track GPU prefix cache hits
+    pub fn record_device_cache_hits(&self, request_id: String, num_tokens: usize) -> PyResult<()> {
+        let mut slot_manager = self.slot_manager.lock().map_err(to_pyerr)?;
+        if let Some(slot) = slot_manager.slots.get_mut(&request_id) {
+            slot.record_device_cache_hits(num_tokens);
+        }
+        Ok(())
+    }
+
+    /// Get cache hit statistics for a specific request
+    /// Returns (device_blocks, host_blocks, disk_blocks)
+    /// Returns None if the request is not found
+    pub fn get_cache_stats(&self, request_id: String) -> PyResult<Option<(u64, u64, u64)>> {
+        let slot_manager = self.slot_manager.lock().map_err(to_pyerr)?;
+        let slot = match slot_manager.slots.get(&request_id) {
+            Some(slot) => slot,
+            None => return Ok(None),
+        };
+
+        let block_size = self.block_manager().block_size();
+        let device_blocks = (slot.num_blocks_cached_from_device()) as u64;
+        let host_blocks = (slot.num_blocks_cached_from_host()) as u64;
+        let disk_blocks = (slot.num_blocks_cached_from_disk()) as u64;
+
+        Ok(Some((device_blocks, host_blocks, disk_blocks)))
+    }
 }
 
 impl KvbmCacheManager {
@@ -400,7 +428,7 @@ impl SlotError {
 }
 
 pub struct SlotManager<R: RequestKey> {
-    slots: HashMap<R, Slot<DeviceStorage, Logical<DistributedLeaderWorkerResources>>>,
+    pub(crate) slots: HashMap<R, Slot<DeviceStorage, Logical<DistributedLeaderWorkerResources>>>,
     block_size: usize,
 }
 

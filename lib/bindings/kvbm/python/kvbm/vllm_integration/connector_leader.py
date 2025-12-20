@@ -125,7 +125,7 @@ class KvConnectorLeader:
         Args:
             request (Request): the request object.
             num_computed_tokens (int): the number of locally
-                computed tokens for this request
+                computed tokens for this request (GPU cache hits from vLLM)
 
         Returns:
             A tuple with the following elements:
@@ -135,6 +135,15 @@ class KvConnectorLeader:
                   asynchronously (between scheduler steps).
         """
         self._create_slot(request)
+
+        # Track device (GPU) cache hits - num_computed_tokens represents tokens already in GPU cache
+        # vLLM has already matched these against its GPU prefix cache before calling us
+        if num_computed_tokens > 0:
+            try:
+                self._connector.record_device_cache_hits(request.request_id, num_computed_tokens)
+            except Exception:
+                pass  # Silently ignore - cache stats are optional
+
         return self._connector.get_num_new_matched_tokens(
             request.request_id,
             request.num_tokens,
@@ -148,6 +157,10 @@ class KvConnectorLeader:
         self._connector.update_state_after_alloc(
             request.request_id, block_ids, num_external_tokens
         )
+
+    def record_device_cache_hits(self, request_id: str, num_tokens: int) -> None:
+        """Record device (GPU) cache hits for a request."""
+        self._connector.record_device_cache_hits(request_id, num_tokens)
 
     def build_connector_meta(self, scheduler_output: SchedulerOutput) -> bytes:
         """
@@ -223,10 +236,31 @@ class KvConnectorLeader:
             Optional KVTransferParams to be included in the request outputs
             returned by the engine.
         """
-        # note our worker can communication with us oob and we can use that to know
+        # Get cache stats BEFORE calling request_finished (which may modify/remove slot state)
+        kv_transfer_params = None
+
+        try:
+            cache_stats = self._connector.get_cache_stats(request.request_id)
+
+            if cache_stats is not None:
+                device_blocks, host_blocks, disk_blocks = cache_stats
+
+                kv_transfer_params = {
+                    "cache_hit_breakdown": {
+                        "device_blocks": int(device_blocks),
+                        "host_blocks": int(host_blocks),
+                        "disk_blocks": int(disk_blocks),
+                    }
+                }
+        except Exception:
+            # Don't fail the request if cache stats retrieval fails
+            pass
+
+        # note our worker can communicate with us oob and we can use that to know
         # ahead of time if the request is finished.
         status = self._connector.request_finished(request.request_id, block_ids)
-        return status, None
+
+        return status, kv_transfer_params
 
     # Utility functions
 

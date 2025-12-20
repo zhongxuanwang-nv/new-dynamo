@@ -104,6 +104,15 @@ class KvbmCacheManager(KVConnectorBase_V1):
 
         num_computed_tokens = block_count * self.block_size
 
+        # Track device cache hits - record the number of tokens matched from GPU
+        # This is called before any host/disk lookups, so these are pure GPU cache hits
+        if num_computed_tokens > 0:
+            try:
+                self.cache_manager.record_device_cache_hits(request.request_id, num_computed_tokens)
+            except AttributeError:
+                # Not all cache managers support this (e.g., non-connector versions)
+                pass
+
         return KvbmCacheBlocks(owned_blocks), num_computed_tokens
 
     def _create_slot(self, request: Request) -> list[int]:
@@ -414,3 +423,15 @@ class KvbmCacheManager(KVConnectorBase_V1):
         This prevents overwrites of paged KV buffer before saving done.
         """
         pass
+
+    def get_cache_stats(self, request_id: str) -> Optional[tuple[int, int, int]]:
+        """Get cache hit statistics for a specific request.
+
+        Args:
+            request_id: The request ID to get stats for.
+
+        Returns:
+            A tuple of (device_blocks, host_blocks, disk_blocks) if the
+            request exists, None otherwise.
+        """
+        return self.cache_manager.get_cache_stats(request_id)

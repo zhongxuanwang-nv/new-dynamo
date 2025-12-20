@@ -117,6 +117,7 @@ class PdConnector(MultiConnector):
     ) -> tuple[int, bool]:
         """
         Get the number of matched tokens for the request using Dynamo Connector (KVBM).
+        Note: DynamoConnector internally tracks device cache hits from num_computed_tokens.
         """
         return self._connectors[0].get_num_new_matched_tokens(
             request, num_computed_tokens
@@ -137,6 +138,11 @@ class PdConnector(MultiConnector):
         # and it only needs to wait for decode worker to pull its data.
         self._connectors[1].update_state_after_alloc(request, empty_blocks, 0)
 
+    def record_device_cache_hits(self, request_id: str, num_tokens: int) -> None:
+        """Record device (GPU) cache hits - delegate to first connector (KVBM)."""
+        if hasattr(self._connectors[0], 'record_device_cache_hits'):
+            self._connectors[0].record_device_cache_hits(request_id, num_tokens)
+
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
     ) -> PdConnectorMetadata:
@@ -149,3 +155,34 @@ class PdConnector(MultiConnector):
             metadata.extra_async_saves = self._extra_async_saves
             self._extra_async_saves = {}
         return metadata
+
+    def request_finished(
+        self,
+        request: "Request",
+        block_ids: list[int],
+    ) -> tuple[bool, Optional[dict]]:
+        """
+        Called when a request has finished. Delegates to connectors and extracts
+        cache stats from KVBM (first connector).
+
+        Returns:
+            Tuple of (async_saving_in_progress, kv_transfer_params)
+        """
+        # Call request_finished on both connectors
+        # First connector (KVBM/LMCache) handles the cache stats
+        status_0, kv_params_0 = self._connectors[0].request_finished(request, block_ids)
+        status_1, kv_params_1 = self._connectors[1].request_finished(request, block_ids)
+
+        # Combine status: True if either connector is doing async operations
+        combined_status = status_0 or status_1
+
+        # Merge kv_transfer_params from both connectors
+        combined_params = {}
+        if kv_params_0:
+            combined_params.update(kv_params_0)
+        if kv_params_1:
+            combined_params.update(kv_params_1)
+
+        result_params = combined_params if combined_params else None
+
+        return combined_status, result_params

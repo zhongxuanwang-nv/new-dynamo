@@ -74,6 +74,10 @@ pub trait Leader: Send + Sync + std::fmt::Debug {
 
     fn create_slot(&mut self, request: KvbmRequest, tokens: Vec<u32>) -> anyhow::Result<()>;
 
+    fn get_cache_stats(&self, request_id: String) -> anyhow::Result<Option<(u64, u64, u64)>>;
+
+    fn record_device_cache_hits(&self, request_id: String, num_tokens: usize) -> anyhow::Result<()>;
+
     fn slot_manager(&self) -> &ConnectorSlotManager<String>;
 }
 
@@ -569,6 +573,14 @@ impl Leader for KvConnectorLeader {
 
         Ok(())
     }
+
+    fn get_cache_stats(&self, request_id: String) -> anyhow::Result<Option<(u64, u64, u64)>> {
+        self.slot_manager().get_cache_stats(&request_id)
+    }
+
+    fn record_device_cache_hits(&self, request_id: String, num_tokens: usize) -> anyhow::Result<()> {
+        self.slot_manager().record_device_cache_hits(&request_id, num_tokens)
+    }
 }
 
 #[pyclass]
@@ -658,6 +670,18 @@ impl PyKvConnectorLeader {
     fn create_slot(&mut self, request: KvbmRequest, tokens: Vec<u32>) -> PyResult<()> {
         self.connector_leader
             .create_slot(request, tokens)
+            .map_err(to_pyerr)
+    }
+
+    fn get_cache_stats(&self, request_id: &str) -> PyResult<Option<(u64, u64, u64)>> {
+        self.connector_leader
+            .get_cache_stats(request_id.to_string())
+            .map_err(to_pyerr)
+    }
+
+    fn record_device_cache_hits(&self, request_id: &str, num_tokens: usize) -> PyResult<()> {
+        self.connector_leader
+            .record_device_cache_hits(request_id.to_string(), num_tokens)
             .map_err(to_pyerr)
     }
 }

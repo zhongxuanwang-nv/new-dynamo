@@ -306,6 +306,42 @@ impl<R: RequestKey> SlotManager<R> for ConnectorSlotManager<R> {
     }
 }
 
+impl<R: RequestKey> ConnectorSlotManager<R> {
+    /// Record device cache hits for a specific request
+    pub fn record_device_cache_hits(&self, request_id: &R, num_tokens: usize) -> anyhow::Result<()> {
+        let slots = self.slots.lock().unwrap();
+        if let Some(slot_mutex) = slots.get(request_id) {
+            let mut slot = slot_mutex.lock().unwrap();
+            slot.record_device_cache_hits(num_tokens);
+        }
+        Ok(())
+    }
+
+    /// Get cache hit statistics for a specific request
+    /// Returns (device_blocks, host_blocks, disk_blocks)
+    /// Returns None if the request is not found
+    pub fn get_cache_stats(&self, request_id: &R) -> anyhow::Result<Option<(u64, u64, u64)>> {
+        let slots = self.slots.lock().unwrap();
+
+        let slot_mutex = match slots.get(request_id) {
+            Some(slot) => slot,
+            None => {
+                return Ok(None);
+            },
+        };
+
+        let slot = slot_mutex.lock().unwrap();
+        let block_size = self.block_manager.block_size();
+
+        // Access fields directly (they're not methods)
+        let device_blocks = (slot.tokens_cached_from_device / block_size) as u64;
+        let host_blocks = (slot.tokens_cached_from_host / block_size) as u64;
+        let disk_blocks = (slot.tokens_cached_from_disk / block_size) as u64;
+
+        Ok(Some((device_blocks, host_blocks, disk_blocks)))
+    }
+}
+
 impl<R: RequestKey> Drop for ConnectorSlotManager<R> {
     fn drop(&mut self) {
         if let Some(task) = self._transfer_engine_handle.take() {
@@ -1047,6 +1083,15 @@ impl Slot for VllmConnectorSlot {
 
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
+    }
+}
+
+impl VllmConnectorSlot {
+    /// Record device (GPU) cache hits - called when GPU prefix cache matches
+    pub fn record_device_cache_hits(&mut self, num_tokens: usize) {
+        let block_size = self.block_size;
+        self.tokens_cached_from_device = (num_tokens / block_size) * block_size; // Round down to block boundary
+        tracing::debug!("Recording {} device cached tokens ({} blocks)", num_tokens, num_tokens / block_size);
     }
 }
 

@@ -44,6 +44,9 @@ from .publisher import StatLoggerFactory
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
+# Global reference to KVBM cache manager (only set if KVBM connector is enabled)
+_kvbm_cache_manager = None
+
 
 async def graceful_shutdown(runtime):
     """
@@ -299,6 +302,20 @@ def setup_vllm_engine(config, stat_logger=None):
         enable_log_requests=engine_args.enable_log_requests,
         disable_log_stats=engine_args.disable_log_stats,
     )
+
+    # Store reference to KVBM cache manager if KVBM connector is enabled
+    global _kvbm_cache_manager
+    if config.has_connector("kvbm"):
+        try:
+            # Import the connector module to access the cache manager
+
+            # The cache manager will be accessible through the connector after engine initialization
+            # We'll access it lazily when needed through the engine's kv connector
+            logger.info("KVBM connector enabled - cache stats will be available per-request")
+            _kvbm_cache_manager = "enabled"  # Marker to indicate KVBM is available
+        except Exception as e:
+            logger.warning(f"KVBM connector enabled but failed to import: {e}")
+
 
     logger.info(f"VllmWorker for {config.served_model_name} has been initialized")
 

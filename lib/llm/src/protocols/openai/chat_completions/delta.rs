@@ -362,37 +362,65 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
         let index = 0;
         let mut stream_response = self.create_choice(index, delta.text, finish_reason, logprobs);
 
-        // Extract worker_id from disaggregated_params and inject into nvext if present
-        if let Some(worker_id_json) = delta
-            .disaggregated_params
-            .as_ref()
-            .and_then(|params| params.get("worker_id"))
-        {
-            use crate::protocols::openai::nvext::{NvExtResponse, WorkerIdInfo};
+        // Extract extra fields from disaggregated_params and inject into nvext if present
+        if let Some(disaggregated_params) = delta.disaggregated_params.as_ref() {
+            use crate::protocols::openai::nvext::{CacheHitBreakdown, NvExtResponse, WorkerIdInfo};
 
-            let prefill_worker_id = worker_id_json
-                .get("prefill_worker_id")
-                .and_then(|v| v.as_u64());
-            let decode_worker_id = worker_id_json
-                .get("decode_worker_id")
-                .and_then(|v| v.as_u64());
+            let mut worker_id_info = None;
+            let mut cache_hit_breakdown_info = None;
 
-            let worker_id_info = WorkerIdInfo {
-                prefill_worker_id,
-                decode_worker_id,
-            };
+            // Extract worker_id if present
+            if let Some(worker_id_json) = disaggregated_params.get("worker_id") {
+                let prefill_worker_id = worker_id_json
+                    .get("prefill_worker_id")
+                    .and_then(|v| v.as_u64());
+                let decode_worker_id = worker_id_json
+                    .get("decode_worker_id")
+                    .and_then(|v| v.as_u64());
 
-            let nvext_response = NvExtResponse {
-                worker_id: Some(worker_id_info),
-            };
-
-            if let Ok(nvext_json) = serde_json::to_value(&nvext_response) {
-                stream_response.nvext = Some(nvext_json);
-                tracing::debug!(
-                    "Injected worker_id into chat completion nvext: prefill={:?}, decode={:?}",
+                worker_id_info = Some(WorkerIdInfo {
                     prefill_worker_id,
-                    decode_worker_id
-                );
+                    decode_worker_id,
+                });
+            }
+
+            // Extract cache_hit_breakdown if present
+            if let Some(cache_stats_json) = disaggregated_params.get("cache_hit_breakdown") {
+                let device_blocks = cache_stats_json
+                    .get("device_blocks")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let host_blocks = cache_stats_json
+                    .get("host_blocks")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let disk_blocks = cache_stats_json
+                    .get("disk_blocks")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+
+                cache_hit_breakdown_info = Some(CacheHitBreakdown {
+                    device_blocks,
+                    host_blocks,
+                    disk_blocks,
+                });
+            }
+
+            // Create NvExtResponse if we have any data to inject
+            if worker_id_info.is_some() || cache_hit_breakdown_info.is_some() {
+                let nvext_response = NvExtResponse {
+                    worker_id: worker_id_info.clone(),
+                    cache_hit_breakdown: cache_hit_breakdown_info.clone(),
+                };
+
+                if let Ok(nvext_json) = serde_json::to_value(&nvext_response) {
+                    stream_response.nvext = Some(nvext_json);
+                    tracing::debug!(
+                        "Injected nvext data into chat completion response - worker_id: {:?}, cache_hit_breakdown: {:?}",
+                        worker_id_info,
+                        cache_hit_breakdown_info
+                    );
+                }
             }
         }
 

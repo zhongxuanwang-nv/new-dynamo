@@ -7,7 +7,7 @@ import os
 import tempfile
 from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
-from typing import Any, AsyncGenerator, Dict, Final
+from typing import Any, AsyncGenerator, Dict, Final, Optional
 
 from vllm.inputs import TokensPrompt
 from vllm.lora.request import LoRARequest
@@ -62,6 +62,54 @@ def get_lora_manager():
             )
 
     return None
+
+
+def get_kvbm_cache_stats(engine_client, request_id: str) -> Optional[Dict[str, Any]]:
+    """Get KVBM cache hit statistics for a request.
+
+    Args:
+        engine_client: The vLLM AsyncLLM engine client
+        request_id: The request ID to get stats for
+
+    Returns:
+        Dict with cache hit breakdown or None if KVBM is not available
+    """
+    try:
+        # Access the cache manager through the engine_core (vLLM v1 uses engine_core, not engine)
+        if not hasattr(engine_client, 'engine_core'):
+            return None
+
+        engine_core = engine_client.engine_core
+
+        # Try to access the scheduler's kv_cache_manager
+        if not hasattr(engine_core, 'scheduler'):
+            return None
+
+        scheduler = engine_core.scheduler
+
+        if not hasattr(scheduler, 'kv_cache_manager'):
+            return None
+
+        cache_manager = scheduler.kv_cache_manager
+
+        # Check if it's a KVBM cache manager (has get_cache_stats method)
+        if not hasattr(cache_manager, 'get_cache_stats'):
+            return None
+
+        stats = cache_manager.get_cache_stats(request_id)
+
+        if stats is None:
+            return None
+
+        device_blocks, host_blocks, disk_blocks = stats
+
+        return {
+            "device_blocks": int(device_blocks),
+            "host_blocks": int(host_blocks),
+            "disk_blocks": int(disk_blocks),
+        }
+    except Exception:
+        return None
 
 
 def build_sampling_params(
@@ -685,10 +733,14 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         )
 
         prefill_result = request.get("prefill_result")
+        prefill_cache_hit_breakdown = None
+
         if prefill_result and isinstance(prefill_result, dict):
-            kv_params = prefill_result.get("disaggregated_params", {}).get(
-                "kv_transfer_params"
-            )
+            disagg_params = prefill_result.get("disaggregated_params", {})
+            kv_params = disagg_params.get("kv_transfer_params")
+
+            # Extract cache_hit_breakdown from prefill result if present
+            prefill_cache_hit_breakdown = disagg_params.get("cache_hit_breakdown")
         else:
             kv_params = None
 
@@ -738,6 +790,13 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         tok["completion_usage"][
                             "prompt_tokens_details"
                         ] = prefill_prompt_tokens_details
+
+                    # Pass through cache_hit_breakdown from prefill worker if present
+                    if prefill_cache_hit_breakdown:
+                        if "disaggregated_params" not in tok or tok["disaggregated_params"] is None:
+                            tok["disaggregated_params"] = {}
+                        tok["disaggregated_params"]["cache_hit_breakdown"] = prefill_cache_hit_breakdown
+
                     yield tok
             except EngineDeadError as e:
                 logger.error(f"vLLM EngineDeadError: {e}")
@@ -851,13 +910,33 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
                     token_ids = res.outputs[0].token_ids if res.outputs else []
 
+                    # Build disaggregated_params with kv_transfer_params
+                    # KVBM automatically includes cache_hit_breakdown in kv_transfer_params when available
+                    disaggregated_params = {}
+                    if res.kv_transfer_params:
+                        extra_fields = request.get("extra_fields", [])
+                        cache_hit_requested = extra_fields and "cache_hit_breakdown" in extra_fields
+
+                        # Extract cache_hit_breakdown if present in kv_transfer_params
+                        cache_hit_breakdown = res.kv_transfer_params.get("cache_hit_breakdown")
+
+                        # Filter kv_transfer_params based on what was requested
+                        kv_params_filtered = {
+                            k: v for k, v in res.kv_transfer_params.items()
+                            if k != "cache_hit_breakdown"  # Always filter out, will add separately if requested
+                        }
+
+                        # Add kv_transfer_params if there's anything left
+                        if kv_params_filtered:
+                            disaggregated_params["kv_transfer_params"] = kv_params_filtered
+
+                        # Add cache_hit_breakdown to top level if it was requested and available
+                        if cache_hit_requested and cache_hit_breakdown:
+                            disaggregated_params["cache_hit_breakdown"] = cache_hit_breakdown
+
                     output: Dict[str, Any] = {
                         "token_ids": list(token_ids),
-                        "disaggregated_params": (
-                            {"kv_transfer_params": res.kv_transfer_params}
-                            if res.kv_transfer_params
-                            else None
-                        ),
+                        "disaggregated_params": disaggregated_params if disaggregated_params else None,
                         "completion_usage": BaseWorkerHandler._build_completion_usage(
                             request_output=res
                         ),
