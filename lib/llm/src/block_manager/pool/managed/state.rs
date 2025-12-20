@@ -136,12 +136,21 @@ impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> State<S, L, M>
         count: usize,
     ) -> Result<Vec<MutableBlock<S, L, M>>, BlockPoolError> {
         let available_blocks = self.inactive.available_blocks() as usize;
+        let active_count = self.active.status();
+
+        tracing::error!(
+            requested = count,
+            available = available_blocks,
+            active_blocks = active_count,
+            "POOL_DEBUG: 📦 allocate_blocks called - pool state before allocation"
+        );
 
         if available_blocks < count {
-            tracing::debug!(
-                "not enough blocks available, requested: {}, available: {}",
-                count,
-                available_blocks
+            tracing::error!(
+                requested = count,
+                available = available_blocks,
+                active_blocks = active_count,
+                "POOL_DEBUG: ❌ NOT ENOUGH BLOCKS - allocation failed"
             );
             return Err(BlockPoolError::NotEnoughBlocksAvailable(
                 count,
@@ -150,12 +159,21 @@ impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> State<S, L, M>
         }
 
         let mut blocks = Vec::with_capacity(count);
+        let mut allocated_ids = Vec::with_capacity(count);
 
         for _ in 0..count {
             if let Some(block) = self.inactive.acquire_free_block() {
+                allocated_ids.push(block.block_id());
                 blocks.push(MutableBlock::new(block, self.return_tx.clone()));
             }
         }
+
+        tracing::error!(
+            count = blocks.len(),
+            block_ids = ?allocated_ids,
+            remaining_available = self.inactive.available_blocks(),
+            "POOL_DEBUG: ✅ INACTIVE→MUTABLE - blocks allocated from inactive pool"
+        );
 
         Ok(blocks)
     }
@@ -170,6 +188,16 @@ impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> State<S, L, M>
         assert!(!blocks.is_empty(), "no blocks to register");
 
         let expected_len = blocks.len();
+        let block_ids: Vec<_> = blocks.iter().map(|b| b.block_id()).collect();
+
+        tracing::error!(
+            num_blocks = expected_len,
+            block_ids = ?block_ids,
+            active_before = self.active.status(),
+            inactive_before = self.inactive.available_blocks(),
+            "POOL_DEBUG: 📝 register_blocks called - registering blocks to active pool"
+        );
+
         let mut immutable_blocks = Vec::new();
 
         // raii object that will collect all the publish handles and publish them when the object is dropped
@@ -177,9 +205,15 @@ impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> State<S, L, M>
 
         for mut block in blocks.into_iter() {
             let sequence_hash = block.sequence_hash()?;
+            let block_id = block.block_id();
 
             // If the block is already registered, acquire a clone of the immutable block
             if let Some(immutable) = self.active.match_sequence_hash(sequence_hash) {
+                tracing::error!(
+                    block_id = block_id,
+                    sequence_hash = sequence_hash,
+                    "POOL_DEBUG: 🔄 ALREADY ACTIVE - block already in active pool"
+                );
                 let immutable = if duplication_setting
                     == BlockRegistrationDuplicationSetting::Allowed
                 {
@@ -265,6 +299,15 @@ impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> State<S, L, M>
 
         assert_eq!(immutable_blocks.len(), expected_len);
 
+        let registered_ids: Vec<_> = immutable_blocks.iter().map(|b| b.block_id()).collect();
+        tracing::error!(
+            num_registered = immutable_blocks.len(),
+            block_ids = ?registered_ids,
+            active_after = self.active.status(),
+            inactive_after = self.inactive.available_blocks(),
+            "POOL_DEBUG: ✅ register_blocks complete - blocks now in active pool"
+        );
+
         Ok(immutable_blocks)
     }
 
@@ -273,9 +316,24 @@ impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> State<S, L, M>
         sequence_hashes: Vec<SequenceHash>,
         return_rx: &mut tokio::sync::mpsc::UnboundedReceiver<Block<S, L, M>>,
     ) -> Vec<ImmutableBlock<S, L, M>> {
+        tracing::error!(
+            num_hashes = sequence_hashes.len(),
+            active_blocks = self.active.status(),
+            available_blocks = self.inactive.available_blocks(),
+            "POOL_DEBUG: 🔍 match_sequence_hashes called"
+        );
+
         let mut immutable_blocks = Vec::new();
+        let mut matched_from_active = 0;
+        let mut matched_from_inactive = 0;
+        let mut waited_for_return = 0;
+
         for sequence_hash in &sequence_hashes {
             if !self.registry.is_registered(*sequence_hash) {
+                tracing::error!(
+                    sequence_hash = *sequence_hash,
+                    "POOL_DEBUG: 🔍 hash not registered, stopping match"
+                );
                 break;
             }
 
@@ -285,14 +343,31 @@ impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> State<S, L, M>
             // 3. return channel
 
             if let Some(immutable) = self.active.match_sequence_hash(*sequence_hash) {
+                matched_from_active += 1;
+                tracing::error!(
+                    sequence_hash = *sequence_hash,
+                    block_id = immutable.block_id(),
+                    "POOL_DEBUG: 🎯 ACTIVE HIT - block already in active pool"
+                );
                 immutable_blocks.push(immutable);
                 continue;
             }
 
             let raw_block =
                 if let Some(raw_block) = self.inactive.match_sequence_hash(*sequence_hash) {
+                    matched_from_inactive += 1;
+                    tracing::error!(
+                        sequence_hash = *sequence_hash,
+                        block_id = raw_block.block_id(),
+                        "POOL_DEBUG: 🎯 INACTIVE HIT - moving block from inactive to active"
+                    );
                     raw_block
                 } else {
+                    waited_for_return += 1;
+                    tracing::error!(
+                        sequence_hash = *sequence_hash,
+                        "POOL_DEBUG: ⏳ WAITING - block in flight, waiting for return..."
+                    );
                     self.wait_for_returned_block(*sequence_hash, return_rx)
                         .await
                 };
@@ -307,8 +382,22 @@ impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> State<S, L, M>
                 .register(mutable)
                 .expect("unable to register block; should never happen");
 
+            tracing::error!(
+                sequence_hash = *sequence_hash,
+                block_id = immutable.block_id(),
+                "POOL_DEBUG: ➡️ INACTIVE→ACTIVE - block promoted to active pool"
+            );
+
             immutable_blocks.push(immutable);
         }
+
+        tracing::error!(
+            total_matched = immutable_blocks.len(),
+            from_active = matched_from_active,
+            from_inactive = matched_from_inactive,
+            waited_for = waited_for_return,
+            "POOL_DEBUG: 🔍 match_sequence_hashes complete"
+        );
 
         immutable_blocks
     }
@@ -338,8 +427,31 @@ impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> State<S, L, M>
 
     /// Returns a block to the inactive pool
     pub fn return_block(&mut self, mut block: Block<S, L, M>) {
+        let block_id = block.block_id();
+        let sequence_hash = block.sequence_hash().ok();
+        let state_before = format!("{:?}", block.state());
+
+        tracing::error!(
+            block_id = block_id,
+            sequence_hash = ?sequence_hash,
+            state = %state_before,
+            active_before = self.active.status(),
+            inactive_before = self.inactive.available_blocks(),
+            "POOL_DEBUG: ⬅️ RETURN BLOCK - returning block to pool"
+        );
+
         self.active.remove(&mut block);
+
+        let was_reset = block.state().is_reset();
         self.inactive.return_block(block);
+
+        tracing::error!(
+            block_id = block_id,
+            was_reset = was_reset,
+            active_after = self.active.status(),
+            inactive_after = self.inactive.available_blocks(),
+            "POOL_DEBUG: ⬅️ ACTIVE→INACTIVE - block returned to inactive pool"
+        );
     }
 
     fn publisher(&self) -> Publisher {

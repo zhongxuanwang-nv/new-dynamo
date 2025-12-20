@@ -238,10 +238,20 @@ impl OpenAIPreprocessor {
         builder.annotations(request.annotations().unwrap_or_default());
         builder.mdc_sum(Some(self.mdcsum.clone()));
         builder.estimated_prefix_hit_num_blocks(None);
-        // Extract backend_instance_id and extra_fields from nvext if present
+        // Extract backend_instance_id, extra_fields, and remaining_reuses from nvext if present
         if let Some(nvext) = request.nvext() {
             builder.backend_instance_id(nvext.backend_instance_id);
             builder.extra_fields(nvext.extra_fields.clone());
+            
+            // Log remaining_reuses extraction at ERROR level for visibility
+            if let Some(remaining_reuses) = nvext.remaining_reuses {
+                tracing::error!(
+                    remaining_reuses = remaining_reuses,
+                    "KV_REUSE: Extracted remaining_reuses from request"
+                );
+            }
+            
+            builder.remaining_reuses(nvext.remaining_reuses);
         }
 
         Ok(builder)
@@ -332,10 +342,10 @@ impl OpenAIPreprocessor {
                 }
 
                 //Fallback: ust pass the URL through
-                media_map
-                    .entry(type_str)
-                    .or_default()
-                    .push(MultimodalData::Url(url));
+                    media_map
+                        .entry(type_str)
+                        .or_default()
+                        .push(MultimodalData::Url(url));
             }
         }
 

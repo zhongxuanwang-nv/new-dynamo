@@ -4,12 +4,17 @@
 set -e
 trap 'echo Cleaning up...; kill 0' EXIT
 
+# Point to B200-compatible FATBIN
+export DYNAMO_FATBIN_PATH=/raid/daniewang/agentdynamo/lib/llm/src/block_manager/block/transfer/kernels/vectorized_copy.fatbin
+
 # run ingress with KV router
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
 python -m dynamo.frontend --router-mode kv &
 
 # run decode workers on GPU 0 and 1, without enabling KVBM
 # NOTE: remove --enforce-eager for production use
+DYN_VLLM_KV_EVENT_PORT=20080 \
+VLLM_NIXL_SIDE_CHANNEL_PORT=20096 \
 CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --connector nixl --enforce-eager --is-decode-worker &
 DYN_VLLM_KV_EVENT_PORT=20081 \
 VLLM_NIXL_SIDE_CHANNEL_PORT=20097 \

@@ -563,7 +563,7 @@ impl Leader for KvConnectorLeader {
     /// This is used to create a new slot for the request.
     fn create_slot(&mut self, request: KvbmRequest, tokens: Vec<u32>) -> anyhow::Result<()> {
         self.slot_manager()
-            .create_slot(&request.request_id, tokens, request.salt_hash)?;
+            .create_slot(&request.request_id, tokens, request.salt_hash, request.remaining_reuses)?;
 
         self.inflight_requests.insert(request.request_id);
 

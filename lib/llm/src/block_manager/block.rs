@@ -488,7 +488,7 @@ pub trait BlockExt {
     fn tokens(&self) -> Option<&Tokens>;
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq, Ord, PartialOrd, Getters)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, Getters)]
 pub struct BasicMetadata {
     #[getter(copy)]
     priority: u32,
@@ -496,6 +496,26 @@ pub struct BasicMetadata {
     returned_tick: u64,
     #[getter(copy)]
     acquired_tick: u64,
+    #[getter(copy)]
+    remaining_reuses: u32,
+}
+
+// Custom Ord implementation: remaining_reuses first (REVERSE - higher is better), then priority, then ticks
+impl Ord for BasicMetadata {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // REVERSE comparison for remaining_reuses: higher values should be kept (evict lower first)
+        other.remaining_reuses
+            .cmp(&self.remaining_reuses)
+            .then(self.priority.cmp(&other.priority))
+            .then(self.returned_tick.cmp(&other.returned_tick))
+            .then(self.acquired_tick.cmp(&other.acquired_tick))
+    }
+}
+
+impl PartialOrd for BasicMetadata {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 impl BasicMetadata {
@@ -504,6 +524,26 @@ impl BasicMetadata {
             priority,
             returned_tick: self.returned_tick,
             acquired_tick: self.acquired_tick,
+            remaining_reuses: self.remaining_reuses,
+        }
+    }
+
+    /// Update remaining_reuses using max() logic
+    /// Takes the maximum of current and new values
+    pub fn update_remaining_reuses(&self, new_remaining_reuses: u32) -> Self {
+        let final_remaining_reuses = self.remaining_reuses.max(new_remaining_reuses);
+        tracing::error!(
+            old_remaining_reuses = self.remaining_reuses,
+            new_remaining_reuses = new_remaining_reuses,
+            final_remaining_reuses = final_remaining_reuses,
+            priority = self.priority,
+            "KV_REUSE: Updating BasicMetadata remaining_reuses with max()"
+        );
+        BasicMetadata {
+            priority: self.priority,
+            returned_tick: self.returned_tick,
+            acquired_tick: self.acquired_tick,
+            remaining_reuses: final_remaining_reuses,
         }
     }
 }
@@ -519,10 +559,14 @@ impl BlockMetadata for BasicMetadata {
 
     fn reset_metadata(&mut self) {
         self.priority = 0;
+        self.remaining_reuses = 0;
     }
 
     fn offload_priority(&self) -> Option<u64> {
-        Some(self.priority as u64)
+        // For offload priority, consider both remaining_reuses and priority
+        // Higher remaining_reuses blocks should be offloaded later (kept in cache longer)
+        // Encode: remaining_reuses as high bits, priority as low bits
+        Some((self.remaining_reuses as u64) << 32 | self.priority as u64)
     }
 }
 /// Collection that holds shared storage and layout
@@ -644,7 +688,15 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> std::fmt::Debug for Muta
 
 impl<S: Storage, L: LocalityProvider, M: BlockMetadata> Drop for MutableBlock<S, L, M> {
     fn drop(&mut self) {
-        tracing::debug!("drop: {:?}", self);
+        if let Some(ref block) = self.block {
+            let block_id = block.block_id();
+            let state = block.state();
+            tracing::error!(
+                block_id = block_id,
+                state = ?state,
+                "CACHE_DEBUG: MutableBlock dropping - sending block back to pool"
+            );
+        }
         if let Some(block) = self.block.take()
             && self.return_tx.send(block).is_err()
         {

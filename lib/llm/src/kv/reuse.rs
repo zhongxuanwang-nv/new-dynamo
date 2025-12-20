@@ -236,12 +236,16 @@ impl AvailableBlocks {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct PriorityKey {
+    remaining_reuses: u32,
     priority: u32,
     return_tick: u64,
     sequence_hash: SequenceHash,
 }
 
-// customize ord and partial ord for to store first by priority (lowest to highest), then by return_tick (lowest to highest)
+// customize ord and partial ord for eviction sorting:
+// 1. First by remaining_reuses (REVERSE - HIGHER values kept longer, lower evicted first)
+// 2. Then by priority (lowest to highest)
+// 3. Then by return_tick (lowest to highest)
 impl PartialOrd for PriorityKey {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
@@ -250,8 +254,10 @@ impl PartialOrd for PriorityKey {
 
 impl Ord for PriorityKey {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.priority
-            .cmp(&other.priority)
+        // REVERSE comparison for remaining_reuses: higher values kept longer
+        other.remaining_reuses
+            .cmp(&self.remaining_reuses)
+            .then(self.priority.cmp(&other.priority))
             .then(self.return_tick.cmp(&other.return_tick))
     }
 }
@@ -259,6 +265,7 @@ impl Ord for PriorityKey {
 impl From<&KvBlock> for PriorityKey {
     fn from(block: &KvBlock) -> Self {
         Self {
+            remaining_reuses: block.remaining_reuses(),
             priority: block.priority,
             return_tick: block.return_tick,
             sequence_hash: block.token_block.sequence_hash(),
@@ -301,6 +308,8 @@ impl AvailableBlocksState {
     // Insert an item with a given key and sequence_hash
     fn insert(&mut self, block: PoolValue<KvBlock>) {
         let sequence_hash = block.token_block.sequence_hash();
+        let remaining_reuses = block.remaining_reuses();
+        
         log::debug!(sequence_hash, "inserting block into available blocks");
 
         // If we already have an entry for this sequence hash, we need to move it to the uninitialized set
@@ -313,6 +322,18 @@ impl AvailableBlocksState {
 
         // Insert into timestamp set
         let key = PriorityKey::from(&*block);
+        
+        // Log insertion with remaining_reuses for visibility
+        if remaining_reuses > 0 {
+            log::error!(
+                sequence_hash = sequence_hash,
+                remaining_reuses = remaining_reuses,
+                priority = key.priority,
+                return_tick = key.return_tick,
+                "KV_REUSE: Inserting block with remaining_reuses into available pool"
+            );
+        }
+        
         let check_multiple_entries = self.priority_set.insert(key, sequence_hash);
         assert!(
             check_multiple_entries.is_none(),
@@ -394,9 +415,18 @@ impl AvailableBlocksState {
 
         // if we have blocks in the priority set, pop the first (it's sorted by priority)
         // a fatal error will occur if the block is not found in the lookup map
-        if let Some((_key, sequence_hash)) = self.priority_set.pop_first() {
+        if let Some((key, sequence_hash)) = self.priority_set.pop_first() {
             let block = match self.lookup_map.remove(&sequence_hash) {
-                Some(block) => block,
+                Some(block) => {
+                    log::error!(
+                        sequence_hash = sequence_hash,
+                        remaining_reuses = key.remaining_reuses,
+                        priority = key.priority,
+                        return_tick = key.return_tick,
+                        "KV_REUSE: Evicting block (lowest remaining_reuses first)"
+                    );
+                    block
+                }
                 None => {
                     panic!("block from priority set not found in lookup map");
                 }
@@ -520,6 +550,10 @@ impl AvailableBlocksState {
                     block.priority = priority;
                 }
 
+                if let Some(new_remaining_reuses) = update.remaining_reuses {
+                    block.update_remaining_reuses(new_remaining_reuses);
+                }
+
                 // if let Some(deadline) = update.deadline {
                 //     block.set_deadline(deadline);
                 // }
@@ -584,6 +618,7 @@ pub enum MatchRequest {
 pub struct UpdateBlock {
     hash: SequenceHash,
     priority: Option<u32>,
+    remaining_reuses: Option<u32>,
 }
 
 #[derive(Dissolve)]

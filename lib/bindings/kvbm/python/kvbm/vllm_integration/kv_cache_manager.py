@@ -86,23 +86,32 @@ class KvbmCacheManager(KVConnectorBase_V1):
         """
         Get the computed blocks for the request.
         """
+        import logging
+        logger = logging.getLogger(__name__)
+        
         if self.log_stats:
             assert self.prefix_cache_stats is not None
             self.prefix_cache_stats.requests += 1
 
         sequence_hashes = self._create_slot(request)
+        
+        logger.error(f"CACHE_DEBUG [Python]: Request {request.request_id} - created slot with {len(sequence_hashes)} hashes")
 
         # We need to ensure there's at least 1 token that we don't match against.
         if (
             len(request.all_token_ids) > 0
             and len(request.all_token_ids) % self.block_size == 0
         ):
+            logger.error(f"CACHE_DEBUG [Python]: Removing last hash (on block boundary)")
             sequence_hashes = sequence_hashes[:-1]
 
+        logger.error(f"CACHE_DEBUG [Python]: Looking up {len(sequence_hashes)} hashes: {sequence_hashes[:3]}...")
         owned_blocks = self.cache_manager.get_computed_blocks(sequence_hashes)
         block_count = owned_blocks.block_count()
 
         num_computed_tokens = block_count * self.block_size
+        
+        logger.error(f"CACHE_DEBUG [Python]: Request {request.request_id} - got {block_count} cached blocks ({num_computed_tokens} tokens)")
 
         return KvbmCacheBlocks(owned_blocks), num_computed_tokens
 
@@ -112,17 +121,31 @@ class KvbmCacheManager(KVConnectorBase_V1):
             raise ValueError("Unsupported request - requires mm extra keys")
 
         all_token_ids = request.all_token_ids
+        
+        # Extract remaining_reuses from sampling_params.extra_args if present
+        remaining_reuses = 0
+        if hasattr(request, 'sampling_params') and request.sampling_params:
+            extra_args = getattr(request.sampling_params, 'extra_args', None)
+            if extra_args and isinstance(extra_args, dict):
+                remaining_reuses = extra_args.get('remaining_reuses', 0)
+                if remaining_reuses > 0:
+                    import logging
+                    logging.error(
+                        f"KV_REUSE: Extracted remaining_reuses={remaining_reuses} from "
+                        f"vLLM Request {request.request_id}"
+                    )
 
         # extract the critial aspects of the request that effect how the tokens are hashed
-        request = KvbmRequest(
+        kvbm_request = KvbmRequest(
             request_id=request.request_id,
             lora_name=request.lora_request.lora_name()
             if request.lora_request
             else None,
             salt_hash=request.cache_salt,
+            remaining_reuses=remaining_reuses,
         )
 
-        return self.cache_manager.create_slot(request, all_token_ids)
+        return self.cache_manager.create_slot(kvbm_request, all_token_ids)
 
     def allocate_slots(
         self,
@@ -227,7 +250,11 @@ class KvbmCacheManager(KVConnectorBase_V1):
         Args:
             request: The request to free the blocks.
         """
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"CACHE_DEBUG [Python]: Freeing blocks for request {request.request_id}")
         self.cache_manager.free(request.request_id)
+        logger.error(f"CACHE_DEBUG [Python]: Freed blocks for request {request.request_id}")
 
     def reset_prefix_cache(self) -> bool:
         """Reset prefix cache. This function may be used in RLHF

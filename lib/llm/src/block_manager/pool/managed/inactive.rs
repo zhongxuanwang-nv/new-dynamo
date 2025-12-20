@@ -99,16 +99,30 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> InactiveBlockPool<S, L, 
     /// * `sequence_hash` - The sequence hash associated with the block's content ([`SequenceHash`]).
     #[instrument(level = "trace", skip(self, block), fields(sequence_hash = ?sequence_hash))]
     fn insert_with_sequence_hash(&mut self, block: Block<S, L, M>, sequence_hash: SequenceHash) {
-        let priority_key = PriorityKey::new(block.metadata().clone(), sequence_hash);
+        let metadata = block.metadata().clone();
+        let priority_key = PriorityKey::new(metadata.clone(), sequence_hash);
+        
         if self.priority_set.contains(&priority_key) {
-            tracing::trace!(
-                "multiple entries with the same sequence hash, resetting block and inserting into uninitialized set"
+            tracing::error!(
+                sequence_hash = sequence_hash,
+                block_id = block.block_id(),
+                "CACHE_DEBUG: Duplicate sequence hash detected, resetting block and moving to uninitialized"
             );
             let mut block = block;
             block.reset();
             self.uninitialized_set.push_back(block);
         } else {
-            tracing::trace!("inserting block to map and priority set");
+            // Log insertion with remaining_reuses if set
+            tracing::error!(
+                sequence_hash = sequence_hash,
+                block_id = block.block_id(),
+                remaining_reuses = metadata.offload_priority().unwrap_or(0) >> 32,
+                priority = metadata.offload_priority().unwrap_or(0) & 0xFFFFFFFF,
+                lookup_map_size = self.lookup_map.len(),
+                priority_set_size = self.priority_set.len(),
+                uninitialized_size = self.uninitialized_set.len(),
+                "CACHE_DEBUG: Inserting CACHED block into inactive pool lookup_map"
+            );
 
             self.priority_set.insert(priority_key);
             self.lookup_map.insert(sequence_hash, block);
@@ -127,26 +141,44 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> InactiveBlockPool<S, L, 
     /// * `block` - The block to insert ([`Block<S, M>`]).
     #[instrument(level = "trace", skip(self, block), fields(block_state = ?block.state()))]
     fn insert(&mut self, block: Block<S, L, M>) {
-        tracing::trace!("Inserting block into available pool");
-
+        let block_id = block.block_id();
+        let state = block.state();
+        
         // If we already have an entry for this sequence hash or the block is reset,
         // we need to move it to the uninitialized set
-        match block.state() {
+        match state {
             BlockState::Reset => {
+                tracing::error!(
+                    block_id = block_id,
+                    "CACHE_DEBUG: Returning RESET block to uninitialized_set"
+                );
                 self.uninitialized_set.push_back(block);
             }
             BlockState::Partial(_) => {
+                tracing::error!(
+                    block_id = block_id,
+                    "CACHE_DEBUG: Returning PARTIAL block (resetting and moving to uninitialized_set)"
+                );
                 let mut block = block;
                 block.reset();
                 self.uninitialized_set.push_back(block);
             }
             BlockState::Complete(_) => {
+                tracing::error!(
+                    block_id = block_id,
+                    "CACHE_DEBUG: Returning COMPLETE block (resetting and moving to uninitialized_set)"
+                );
                 let mut block = block;
                 block.reset();
                 self.uninitialized_set.push_back(block);
             }
             BlockState::Registered(state, _) => {
                 let sequence_hash = state.sequence_hash();
+                tracing::error!(
+                    block_id = block_id,
+                    sequence_hash = sequence_hash,
+                    "CACHE_DEBUG: Returning REGISTERED block (will cache)"
+                );
                 self.insert_with_sequence_hash(block, sequence_hash);
             }
         }
@@ -204,11 +236,51 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> InactiveBlockPool<S, L, 
         // increment the return tick
         self.return_tick += 1;
 
+        let block_id = block.block_id();
+        let state_str = format!("{:?}", block.state());
+        let remaining_reuses = block.metadata().offload_priority().unwrap_or(0) >> 32;
+        let sequence_hash = block.sequence_hash().ok();
+
+        let uninitialized_before = self.uninitialized_set.len();
+        let lookup_before = self.lookup_map.len();
+
         // update the metadata
         block.metadata_on_returned(self.return_tick);
 
+        tracing::error!(
+            block_id = block_id,
+            sequence_hash = ?sequence_hash,
+            state = %state_str,
+            remaining_reuses = remaining_reuses,
+            return_tick = self.return_tick,
+            uninitialized_before = uninitialized_before,
+            cached_before = lookup_before,
+            "INACTIVE_POOL_DEBUG: ⬅️ return_block() called - returning block to inactive pool"
+        );
+
         // insert the block into the pool
         self.insert(block);
+
+        let uninitialized_after = self.uninitialized_set.len();
+        let lookup_after = self.lookup_map.len();
+
+        let destination = if uninitialized_after > uninitialized_before {
+            "uninitialized_set"
+        } else if lookup_after > lookup_before {
+            "lookup_map (cached)"
+        } else {
+            "unknown (duplicate?)"
+        };
+
+        tracing::error!(
+            block_id = block_id,
+            destination = destination,
+            uninitialized_after = uninitialized_after,
+            cached_after = lookup_after,
+            total_available = self.available_blocks(),
+            "INACTIVE_POOL_DEBUG: ✅ Block inserted into {} - pool state after return",
+            destination
+        );
 
         // self.available_blocks += 1;
     }
@@ -247,6 +319,19 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> InactiveBlockPool<S, L, 
     fn take_with_sequence_hash(&mut self, sequence_hash: SequenceHash) -> Option<Block<S, L, M>> {
         match self.lookup_map.remove(&sequence_hash) {
             Some(block) => {
+                let block_id = block.block_id();
+                let remaining_reuses = block.metadata().offload_priority().unwrap_or(0) >> 32;
+                let priority = block.metadata().offload_priority().unwrap_or(0) & 0xFFFFFFFF;
+                
+                tracing::error!(
+                    sequence_hash = sequence_hash,
+                    block_id = block_id,
+                    remaining_reuses = remaining_reuses,
+                    priority = priority,
+                    remaining_cached = self.lookup_map.len(),
+                    "CACHE_DEBUG: ✅ CACHE HIT - Found block in lookup_map with remaining_reuses={}", 
+                    remaining_reuses
+                );
                 // Remove from priority set.
                 let priority_key = PriorityKey::new(block.metadata().clone(), sequence_hash);
                 // Remove from priority set, if it exists.
@@ -255,7 +340,14 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> InactiveBlockPool<S, L, 
                 self.available_blocks.fetch_sub(1, Ordering::Relaxed);
                 Some(block)
             }
-            None => None,
+            None => {
+                tracing::error!(
+                    sequence_hash = sequence_hash,
+                    current_cached_count = self.lookup_map.len(),
+                    "CACHE_DEBUG: ❌ CACHE MISS - Block not found in lookup_map"
+                );
+                None
+            }
         }
     }
 
@@ -369,10 +461,22 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> InactiveBlockPool<S, L, 
     /// a bug in the pool's internal logic.
     #[instrument(level = "debug", skip(self))]
     pub fn acquire_free_block(&mut self) -> Option<Block<S, L, M>> {
+        tracing::error!(
+            uninitialized_count = self.uninitialized_set.len(),
+            cached_count = self.lookup_map.len(),
+            total_available = self.available_blocks.load(Ordering::Relaxed),
+            "CACHE_DEBUG: acquire_free_block called - pool state"
+        );
+        
         // First try uninitialized blocks - these are often part of sequences
         // that have been arranged in the correct order
         if let Some(mut block) = self.uninitialized_set.pop_front() {
-            tracing::trace!("Acquired uninitialized block");
+            let block_id = block.block_id();
+            tracing::error!(
+                block_id = block_id,
+                remaining_uninitialized = self.uninitialized_set.len(),
+                "CACHE_DEBUG: Allocated from uninitialized_set (NO EVICTION)"
+            );
             self.return_tick += 1;
             block.metadata_on_acquired(self.return_tick);
             self.available_blocks.fetch_sub(1, Ordering::Relaxed);
@@ -382,9 +486,27 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> InactiveBlockPool<S, L, 
         // if we have blocks in the priority set, pop the first (it's sorted by priority)
         // a fatal error will occur if the block is not found in the lookup map
         if let Some(key) = self.priority_set.pop_first() {
-            tracing::trace!("Acquired priority/registered block map; resetting block");
+            // Log eviction with remaining_reuses info
+            let metadata = key.metadata();
+            let remaining_reuses = metadata.offload_priority().unwrap_or(0) >> 32;
+            let priority = metadata.offload_priority().unwrap_or(0) & 0xFFFFFFFF;
+            
+            tracing::error!(
+                sequence_hash = key.sequence_hash(),
+                remaining_reuses = remaining_reuses,
+                priority = priority,
+                remaining_cached = self.lookup_map.len() - 1,
+                "CACHE_DEBUG: ⚠️ EVICTING CACHED BLOCK (destroying cache!) - lowest remaining_reuses first"
+            );
+            
             match self.lookup_map.remove(&key.sequence_hash()) {
                 Some(mut block) => {
+                    let block_id = block.block_id();
+                    tracing::error!(
+                        block_id = block_id,
+                        sequence_hash = key.sequence_hash(),
+                        "CACHE_DEBUG: Evicted block ID, resetting state"
+                    );
                     block.reset();
                     self.return_tick += 1;
                     block.metadata_on_acquired(self.return_tick);
@@ -398,6 +520,7 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> InactiveBlockPool<S, L, 
                 }
             }
         } else {
+            tracing::error!("CACHE_DEBUG: ❌ NO BLOCKS AVAILABLE - returning None");
             // No blocks available in either set
             None
         }

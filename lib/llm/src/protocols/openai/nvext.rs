@@ -24,6 +24,7 @@ pub struct WorkerIdInfo {
     pub decode_worker_id: Option<u64>,
 }
 
+
 /// NVIDIA LLM response extensions
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct NvExtResponse {
@@ -87,6 +88,13 @@ pub struct NvExt {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[builder(default, setter(strip_option))]
     pub extra_fields: Option<Vec<String>>,
+
+    /// Remaining number of reuses for KV cache blocks from this request
+    /// Higher values mean blocks are less likely to be evicted
+    /// When a block is touched again, the value is updated to max(current, new)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default, setter(strip_option))]
+    pub remaining_reuses: Option<u32>,
 }
 
 impl Default for NvExt {
@@ -133,6 +141,7 @@ mod tests {
         assert_eq!(nv_ext.token_data, None);
         assert_eq!(nv_ext.max_thinking_tokens, None);
         assert_eq!(nv_ext.extra_fields, None);
+        assert_eq!(nv_ext.remaining_reuses, None);
     }
 
     // Test valid builder configurations
@@ -155,6 +164,18 @@ mod tests {
         assert_eq!(nv_ext.max_thinking_tokens, Some(1024));
         assert_eq!(nv_ext.extra_fields, Some(vec!["worker_id".to_string()]));
         // Validate the built struct
+        assert!(nv_ext.validate().is_ok());
+    }
+
+    // Test remaining_reuses configuration
+    #[test]
+    fn test_nv_ext_with_remaining_reuses() {
+        let nv_ext = NvExt::builder()
+            .remaining_reuses(5)
+            .build()
+            .unwrap();
+
+        assert_eq!(nv_ext.remaining_reuses, Some(5));
         assert!(nv_ext.validate().is_ok());
     }
 }

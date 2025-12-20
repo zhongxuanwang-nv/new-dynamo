@@ -313,7 +313,19 @@ impl<S: Storage, L: LocalityProvider> Slot<S, L> {
 
         let num_new_blocks = total_num_blocks - (self.immutable.len() + self.mutable.len());
 
+        tracing::error!(
+            num_new_tokens = num_new_tokens,
+            computed_position = self.computed_position,
+            current_immutable = self.immutable.len(),
+            current_mutable = self.mutable.len(),
+            total_needed = total_num_blocks,
+            num_new_blocks = num_new_blocks,
+            "CACHE_DEBUG: Slot allocate_blocks - need to allocate {} new blocks",
+            num_new_blocks
+        );
+
         if num_new_blocks == 0 {
+            tracing::error!("CACHE_DEBUG: No new blocks needed");
             return Some(Vec::new());
         }
 
@@ -321,11 +333,23 @@ impl<S: Storage, L: LocalityProvider> Slot<S, L> {
 
         match new_blocks {
             Some(new_blocks) => {
-                let block_ids = new_blocks.iter().map(|b| b.block_id()).collect();
+                let block_ids: Vec<_> = new_blocks.iter().map(|b| b.block_id()).collect();
+                tracing::error!(
+                    allocated_count = block_ids.len(),
+                    block_ids = ?block_ids,
+                    "CACHE_DEBUG: Successfully allocated {} blocks",
+                    block_ids.len()
+                );
                 self.mutable.extend(new_blocks);
                 Some(block_ids)
             }
-            None => None,
+            None => {
+                tracing::error!(
+                    "CACHE_DEBUG: ❌ Failed to allocate {} blocks - insufficient blocks",
+                    num_new_blocks
+                );
+                None
+            }
         }
     }
 
@@ -333,10 +357,25 @@ impl<S: Storage, L: LocalityProvider> Slot<S, L> {
     /// This will return the blocks in reverse order so that the tail blocks are evicted first.
     #[tracing::instrument(level = "debug")]
     pub fn free_blocks(&mut self) {
+        let num_mutable = self.mutable.len();
+        let num_immutable = self.immutable.len();
+        
+        tracing::error!(
+            num_mutable = num_mutable,
+            num_immutable = num_immutable,
+            "CACHE_DEBUG: Slot freeing {} mutable + {} immutable blocks (dropping will return to pool)",
+            num_mutable,
+            num_immutable
+        );
+        
         self.mutable.clear();
         let mut immutable_blocks = std::mem::take(&mut self.immutable);
         immutable_blocks.reverse();
         self.computed_position = 0;
+        
+        tracing::error!(
+            "CACHE_DEBUG: Slot blocks cleared (they will drop and return to pool now)"
+        );
     }
 
     /// Returns the block ids for the slot.

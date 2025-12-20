@@ -101,6 +101,11 @@ pub struct PreprocessedRequest {
     #[builder(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extra_fields: Option<Vec<String>>,
+
+    /// Remaining number of reuses for KV cache blocks from this request
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remaining_reuses: Option<u32>,
 }
 
 impl PreprocessedRequest {

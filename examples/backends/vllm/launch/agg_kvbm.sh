@@ -4,6 +4,9 @@
 set -e
 trap 'echo Cleaning up...; kill 0' EXIT
 
+export BLOCK_SIZE=16
+export MAX_NUM_BLOCKS=15
+
 # run ingress
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
 python -m dynamo.frontend &
@@ -11,4 +14,5 @@ python -m dynamo.frontend &
 # run worker with KVBM enabled
 # NOTE: remove --enforce-eager for production use
 DYN_KVBM_CPU_CACHE_GB=20 \
-  python -m dynamo.vllm --model Qwen/Qwen3-0.6B --connector kvbm --enforce-eager
+DYN_KVBM_CPU_CACHE_OVERRIDE_NUM_BLOCKS=1 \
+  python -m dynamo.vllm --model Qwen/Qwen3-0.6B --connector kvbm --enforce-eager --block-size $BLOCK_SIZE --num-gpu-blocks-override $MAX_NUM_BLOCKS

@@ -20,6 +20,7 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+export NUM_GPU_BLOCKS=15
 
 # run frontend
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
@@ -28,9 +29,13 @@ DYNAMO_PID=$!
 
 # run worker
 # Additional command line args can be passed
+# CAN'T CHANGE THE BLOCK SIZE HERE. IT HAS NO USE.
+DYN_KVBM_CPU_CACHE_OVERRIDE_NUM_BLOCKS=1 \
+CUDA_VISIBLE_DEVICES=5 \
 python3 -m dynamo.trtllm \
   --model-path "$MODEL_PATH" \
   --served-model-name "$SERVED_MODEL_NAME" \
   --modality "$MODALITY" \
+  --kv-block-size 32 \
   --extra-engine-args "$AGG_ENGINE_ARGS" \
   "$@"

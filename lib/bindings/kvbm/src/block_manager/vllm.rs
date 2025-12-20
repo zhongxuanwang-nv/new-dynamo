@@ -127,12 +127,26 @@ impl KvbmCacheManager {
         // Unfortunately, we cannot associate the sequence hashes with the request ID due to the calling
         // structure of the vLLM scheduler.
 
+        tracing::error!(
+            num_hashes = sequence_hashes.len(),
+            hashes = ?sequence_hashes,
+            "CACHE_DEBUG: get_computed_blocks called - looking up cache"
+        );
+
         let blocks = self
             .block_manager()
             .device()
             .unwrap()
             .match_sequence_hashes_blocking(&sequence_hashes)
             .map_err(to_pyerr)?;
+
+        tracing::error!(
+            num_matched = blocks.len(),
+            requested = sequence_hashes.len(),
+            "CACHE_DEBUG: get_computed_blocks result - matched {} of {} blocks",
+            blocks.len(),
+            sequence_hashes.len()
+        );
 
         Ok(KvbmBlockList::new(BlockListType::ImmutableDevice(blocks)))
     }
@@ -171,8 +185,16 @@ impl KvbmCacheManager {
     }
 
     pub fn free(&self, request_id: String) -> PyResult<()> {
+        tracing::error!(
+            request_id = %request_id,
+            "CACHE_DEBUG: free() called - about to free blocks for request"
+        );
         let mut slot_manager = self.slot_manager.lock().map_err(to_pyerr)?;
         slot_manager.free_blocks(&request_id);
+        tracing::error!(
+            request_id = %request_id,
+            "CACHE_DEBUG: free() completed - blocks should now be returning to pool"
+        );
         Ok(())
     }
 

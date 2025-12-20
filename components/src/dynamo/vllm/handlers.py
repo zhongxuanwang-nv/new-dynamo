@@ -163,6 +163,16 @@ def build_sampling_params(
         dynamic_default = max(1, model_max_len - input_length)
         sampling_params.max_tokens = dynamic_default
 
+    # Handle remaining_reuses for KV cache eviction
+    remaining_reuses = request.get("remaining_reuses")
+    if remaining_reuses is not None and remaining_reuses > 0:
+        if sampling_params.extra_args is None:
+            sampling_params.extra_args = {}
+        sampling_params.extra_args["remaining_reuses"] = remaining_reuses
+        logger.error(
+            f"KV_REUSE: Set remaining_reuses={remaining_reuses} in sampling_params.extra_args"
+        )
+
     return sampling_params
 
 
@@ -811,7 +821,7 @@ class BaseWorkerHandler(ABC):
                             logger.debug(
                                 f"Completed token generation for request {request_id}: "
                                 f"{next_total_toks} output tokens, finish_reason={output.finish_reason}"
-                            )
+                        )
                     if output.stop_reason:
                         out["stop_reason"] = output.stop_reason
                     yield out
@@ -919,7 +929,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         else:
             logger.debug(
                 f"Decode request {request_id} has no LoRA specified (model: {model_name})"
-            )
+        )
 
         dp_rank = request.get("dp_rank", None)
 

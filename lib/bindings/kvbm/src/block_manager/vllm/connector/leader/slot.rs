@@ -41,12 +41,13 @@ pub trait SlotManager<R: RequestKey>: Send + Sync {
 
     fn has_slot(&self, request_id: &R) -> bool;
 
-    /// Create a new slot for the given request ID, initial tokens and salt hash.
+    /// Create a new slot for the given request ID, initial tokens, salt hash, and remaining_reuses.
     fn create_slot(
         &self,
         request_id: &R,
         tokens: Vec<u32>,
         salt_hash: SaltHash,
+        remaining_reuses: u32,
     ) -> Result<(), SlotError>;
 
     fn get_slot(&self, request_id: &R) -> Result<Arc<Mutex<Self::SlotType>>, SlotError>;
@@ -273,11 +274,13 @@ impl<R: RequestKey> SlotManager<R> for ConnectorSlotManager<R> {
         request_id: &R,
         tokens: Vec<u32>,
         salt_hash: SaltHash,
+        remaining_reuses: u32,
     ) -> Result<(), SlotError> {
         tracing::debug!(
-            "creating slot with request_id: {}, num_tokens: {}",
+            "creating slot with request_id: {}, num_tokens: {}, remaining_reuses: {}",
             request_id,
-            tokens.len()
+            tokens.len(),
+            remaining_reuses
         );
         let slot = VllmConnectorSlot::new(
             request_id.to_string(),
@@ -286,6 +289,7 @@ impl<R: RequestKey> SlotManager<R> for ConnectorSlotManager<R> {
             self.block_manager.clone(),
             self.xfer_tx.clone(),
             self.cache_stats.clone(),
+            remaining_reuses,
         );
         self.slots
             .lock()
@@ -378,6 +382,10 @@ pub struct VllmConnectorSlot {
 
     /// Cache statistics tracker for this KVBM instance
     cache_stats: Arc<CacheStatsTracker>,
+
+    /// Remaining reuses for KV cache blocks from this request
+    /// Higher values mean blocks are less likely to be evicted
+    remaining_reuses: u32,
 }
 
 impl VllmConnectorSlot {
@@ -388,11 +396,20 @@ impl VllmConnectorSlot {
         block_manager: VllmBlockManager,
         xfer_tx: mpsc::UnboundedSender<LocalTransferRequest>,
         cache_stats: Arc<CacheStatsTracker>,
+        remaining_reuses: u32,
     ) -> Self {
         assert!(!tokens.is_empty(), "tokens must be non-empty");
         let block_size = block_manager.block_size();
         debug_assert!(block_size.is_power_of_two() && block_size <= 1024);
         let sequence = TokenBlockSequence::new(tokens, block_size as u32, Some(salt_hash));
+        
+        if remaining_reuses > 0 {
+            tracing::error!(
+                request_id = %request_id,
+                remaining_reuses = remaining_reuses,
+                "KV_REUSE: Creating VllmConnectorSlot with remaining_reuses"
+            );
+        }
 
         Self {
             request_id,
@@ -415,6 +432,7 @@ impl VllmConnectorSlot {
             performed_cache_lookup: false,
             total_blocks_queried: 0,
             cache_stats,
+            remaining_reuses,
         }
     }
 
@@ -959,6 +977,30 @@ impl Slot for VllmConnectorSlot {
             return Ok(());
         }
 
+        // Update metadata for matched blocks with remaining_reuses (using max logic)
+        if self.remaining_reuses > 0 {
+            for block in host_blocks.iter_mut() {
+                let old_metadata = block.metadata().clone();
+                let new_metadata = old_metadata.update_remaining_reuses(self.remaining_reuses);
+                block.update_metadata(new_metadata);
+            }
+            for block in disk_blocks.iter_mut() {
+                let old_metadata = block.metadata().clone();
+                let new_metadata = old_metadata.update_remaining_reuses(self.remaining_reuses);
+                block.update_metadata(new_metadata);
+            }
+            
+            if !host_blocks.is_empty() || !disk_blocks.is_empty() {
+                tracing::error!(
+                    request_id = %self.request_id,
+                    remaining_reuses = self.remaining_reuses,
+                    num_host_blocks = host_blocks.len(),
+                    num_disk_blocks = disk_blocks.len(),
+                    "KV_REUSE: Updated remaining_reuses on matched blocks (using max logic)"
+                );
+            }
+        }
+        
         self.staging_from_host = if !host_blocks.is_empty() {
             Some(host_blocks)
         } else {

@@ -22,6 +22,32 @@ impl KvStorageManager {
         }
     }
 
+    /// Update remaining_reuses for blocks matching the given sequence hashes
+    /// Uses max() logic: takes maximum of current and new values
+    pub async fn update_remaining_reuses(
+        &self,
+        hashes: Vec<SequenceHash>,
+        remaining_reuses: u32,
+    ) -> Result<()> {
+        log::error!(
+            num_blocks = hashes.len(),
+            remaining_reuses = remaining_reuses,
+            "KV_REUSE: Updating remaining_reuses for {} blocks (using max logic)",
+            hashes.len()
+        );
+        
+        let updates: Vec<reuse::UpdateBlock> = hashes
+            .into_iter()
+            .map(|hash| reuse::UpdateBlock {
+                hash,
+                priority: None,
+                remaining_reuses: Some(remaining_reuses),
+            })
+            .collect();
+
+        self.available_blocks.update_multiple(updates).await
+    }
+
     pub async fn prepare_prefill_sequence(&mut self, tokens: Tokens) -> Result<PrefillMatched> {
         log::debug!("adding request with {} tokens", tokens.len());
 

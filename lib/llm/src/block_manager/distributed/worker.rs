@@ -804,6 +804,12 @@ impl KvbmWorker {
             }) as Arc<dyn Handler>,
         );
 
+        tracing::error!(
+            num_device_blocks = config.num_device_blocks,
+            bytes_per_block = bytes_per_block,
+            "CACHE_DEBUG: Worker reporting metadata to leader"
+        );
+        
         handlers.insert(
             ZMQ_WORKER_METADATA_MESSAGE.to_string(),
             Arc::new(WorkerMetadataHandler {

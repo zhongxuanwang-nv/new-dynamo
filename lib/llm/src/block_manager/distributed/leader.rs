@@ -155,7 +155,17 @@ impl KvbmLeader {
                 cancel.clone(),
                 move |workers: &[WorkerMetadata]| -> LeaderMetadata {
                     // Record device blocks: min across workers
+                    tracing::error!(
+                        num_workers = workers.len(),
+                        worker_device_blocks = ?workers.iter().map(|w| w.num_device_blocks).collect::<Vec<_>>(),
+                        "CACHE_DEBUG: Leader received worker metadata"
+                    );
+                    
                     if let Some(min_dev) = workers.iter().map(|w| w.num_device_blocks).min() {
+                        tracing::error!(
+                            min_device_blocks = min_dev,
+                            "CACHE_DEBUG: 🚨 Leader setting num_device_blocks to MINIMUM across workers"
+                        );
                         num_device_blocks_cell.store(min_dev, Ordering::Release);
                     }
 
@@ -163,6 +173,13 @@ impl KvbmLeader {
                     let bytes_per_block: usize = workers.iter().map(|w| w.bytes_per_block).sum();
                     let num_host_blocks = compute_num_blocks(&host_cfg, bytes_per_block);
                     let num_disk_blocks = compute_num_blocks(&disk_cfg, bytes_per_block);
+
+                    tracing::error!(
+                        num_host_blocks = num_host_blocks,
+                        num_disk_blocks = num_disk_blocks,
+                        bytes_per_block = bytes_per_block,
+                        "CACHE_DEBUG: Leader computed host/disk blocks"
+                    );
 
                     // store into leader state
                     num_host_blocks_cell.store(num_host_blocks, Ordering::Release);
